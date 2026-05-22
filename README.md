@@ -16,7 +16,7 @@ link：https://github.com/Equim-chan/Mortal
 ## 关于数据集和训练模型
 # Training Pipeline
 
-1. Prepare mjai dataset (.json.gz)
+1. Prepare mjai dataset by yourself(.json.gz)
 
 2. Configure `config.toml`
 
