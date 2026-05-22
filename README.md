@@ -44,4 +44,17 @@ mortal.best
 
 通过api调用mortal.best模型进行推理，实现agent打麻将。
 
+# 前端界面参考
+
+1. Mortal/log-viewer/index-example.html
+
+2. <img width="1134" height="762" alt="image" src="https://github.com/user-attachments/assets/bfbbbdc1-4a0e-4ab4-ac56-77ac747d594e" />
+
+3.<img width="506" height="339" alt="image" src="https://github.com/user-attachments/assets/5dfb3858-5da0-428b-b46e-f74dab6700d9" />
+
+参考项目：Akagi
+
+链接：https://github.com/shinkuan/Akagi/tree/v3
+
+
 
