@@ -1,0 +1,13 @@
+Do not include trained model checkpoints in the course ZIP/RAR.
+
+Model source:
+https://github.com/Equim-chan/Mortal
+
+Put the selected checkpoint download link here before final Blackboard
+submission, for example:
+
+Mortal checkpoint: <paste Google Drive / OneDrive / GitHub Release link>
+
+The browser demo works without the checkpoint by using a deterministic
+Mortal-inspired fallback policy. The Python adapter in source_code can call
+Mortal's documented CLI once a checkpoint is configured.
