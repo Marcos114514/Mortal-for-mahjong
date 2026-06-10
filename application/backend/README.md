@@ -26,15 +26,17 @@ backend/
 
 ## Run
 
-The repo root contains a `scripts/` folder with helpers; from there:
+From the repo root:
 
 ```bash
-./scripts/run-backend.sh            # uses Mortal/.venv
+./application/scripts/run-backend.sh                 # uses source_code/.venv
 # or directly:
-PYTHONPATH=backend/src .venv/bin/python -m mortal_play --port 8001
+PYTHONPATH=application/backend/src \
+  source_code/.venv/bin/python -m mortal_play --port 8001
 ```
 
-(`.venv` lives at `Mortal/.venv`. See top-level `README.md` for one-time setup.)
+(The Python venv lives at `source_code/.venv/`. See top-level `README.md` for
+one-time setup.)
 
 ## Endpoints
 

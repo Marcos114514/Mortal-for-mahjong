@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Start the Vue frontend dev server.
-# Run from the repo root: ./scripts/run-frontend.sh
+# Run from the repo root: ./application/scripts/run-frontend.sh
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT/frontend"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT/application/frontend"
 
 # Try common Node locations if it's not on PATH already.
 if ! command -v npm >/dev/null 2>&1; then

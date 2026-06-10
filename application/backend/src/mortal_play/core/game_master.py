@@ -58,6 +58,10 @@ class GameMaster:
         self.kyotaku = 0
         self.event_bus: asyncio.Queue[dict] = asyncio.Queue()
         self.human_reactions: asyncio.Queue[dict] = asyncio.Queue()
+        # Set by the server when the human clicks "Continue" on the
+        # end-of-kyoku modal. Pre-set so the very first kyoku doesn't wait.
+        self.continue_event: asyncio.Event = asyncio.Event()
+        self.continue_event.set()
         self.human_seat: Optional[int] = next(
             (i for i, a in enumerate(agents) if isinstance(a, HumanAgent)), None,
         )
@@ -72,6 +76,13 @@ class GameMaster:
                 if self._is_game_over():
                     break
                 self._advance_kyoku()
+                # Wait for the human to click "Continue" before starting the
+                # next kyoku. The server sets `continue_event` when it
+                # receives a {"type": "continue"} message from the client.
+                # Skip if there's no human seat (full AI run).
+                if self.human_seat is not None:
+                    self.continue_event.clear()
+                    await self.continue_event.wait()
             await self._emit({"type": "end_game"})
         except Exception:
             log.exception("game master crashed")

@@ -121,7 +121,71 @@ function resetGameState() {
 }
 
 // ─ event handler dispatch ─
+
+// Decode Mortal's action distribution (action index 0..45) into a small
+// {tile-or-action: q-value} map for the right-panel "Agent Decision" widget.
+// Mortal v4 mapping (libriichi/src/agent/mortal.rs):
+//   0..36 : discard tile id (1m..9m, 1p..9p, 1s..9s, E,S,W,N,P,F,C, plus aka 5s)
+//   37    : riichi
+//   38/39/40 : chi low/mid/high
+//   41    : pon
+//   42    : kan (any kan)
+//   43    : hora
+//   44    : ryukyoku
+//   45    : pass / none
+const TILE_BY_ACTION_IDX = (() => {
+  const arr = [];
+  ["m", "p", "s"].forEach((s) => { for (let r = 1; r <= 9; r++) arr.push(`${r}${s}`); });
+  ["E", "S", "W", "N", "P", "F", "C"].forEach((h) => arr.push(h));
+  arr.push("5mr"); arr.push("5pr"); arr.push("5sr");
+  return arr; // length 37
+})();
+
+const ACTION_LABEL_BY_IDX = (() => {
+  const m = {};
+  for (let i = 0; i < TILE_BY_ACTION_IDX.length; i++) m[i] = TILE_BY_ACTION_IDX[i];
+  m[37] = "Riichi";
+  m[38] = "Chi (low)";
+  m[39] = "Chi (mid)";
+  m[40] = "Chi (high)";
+  m[41] = "Pon";
+  m[42] = "Kan";
+  m[43] = "Hora";
+  m[44] = "Ryukyoku";
+  m[45] = "Pass";
+  return m;
+})();
+
+function captureMortalDecision(ev) {
+  const meta = ev.meta;
+  if (!meta || !Array.isArray(meta.q_values)) return;
+  const q = meta.q_values;
+  const mask = meta.mask_bits;
+  const out = {};
+  for (let i = 0; i < q.length; i++) {
+    if (mask != null && !((BigInt(mask) >> BigInt(i)) & 1n)) continue;
+    const label = ACTION_LABEL_BY_IDX[i] ?? `act${i}`;
+    out[label] = q[i];
+  }
+  qValues.value = out;
+  // Also surface a one-liner about what Mortal chose this turn.
+  const label = (
+    ev.type === "dahai" ? `discard ${ev.pai}` :
+    ev.type === "reach" ? "Riichi" :
+    ev.type === "hora" ? (ev.actor === ev.target ? "Tsumo" : "Ron") :
+    ev.type === "pon" ? "Pon" :
+    ev.type === "chi" ? "Chi" :
+    ev.type === "daiminkan" || ev.type === "ankan" || ev.type === "kakan" ? "Kan" :
+    ev.type
+  );
+  decisionText.value = `Mortal: ${label}`;
+}
+
 function onMjai(ev) {
+  // Capture Q-values for the Agent Decision panel whenever the Mortal seat acts.
+  if (ev.actor === 2 && ev.meta) {
+    captureMortalDecision(ev);
+  }
   const t = ev.type;
   switch (t) {
     case "ready":
@@ -525,13 +589,13 @@ function newRound() {
 }
 
 function onModalContinue() {
-  // For an end-of-kyoku modal, the backend has already started the next
-  // kyoku in the background — we just dismiss the modal.
-  // For an end-of-game modal, we restart with a fresh session.
   if (modalState.value?.kind === "game") {
+    // Final modal: start a brand-new session.
     newRound();
     return;
   }
+  // End-of-kyoku modal: tell the backend to proceed to the next kyoku.
+  send({ type: "continue" });
   modalState.value = null;
 }
 
@@ -853,32 +917,24 @@ function rebuildScene() {
 function layoutFuro(furo, pid) {
   if (!furo || !furo.length) return;
 
-  // 一组面子的横向 footprint = 3 张立牌 + 1 张横放 ≈ 3*TW + TH
-  const groupGap = 0.18;
-  const groupWidth = 3 * (TW + 0.03) + TH + 0.05;
+  // 一组面子的横向 footprint:3 张立牌(各占 TW) + 1 张横放(占 TH) + 内部间隔
+  const innerGap = 0.04;
+  const groupGap = 0.22;
+  // chi/pon 都是 3 张立 + 1 张横,daiminkan 是 3 张立 + 1 张横,
+  // ankan 是 4 张立。统一估算成 3*TW + TH 当上限。
+  const groupWidth = 3 * TW + TH + innerGap * 3;
 
-  // 每个玩家的手牌占用宽度:
-  //   pid 0 (我): 立牌实宽 = (n-1)*(TW+0.06) + TW + drawn? + 间隔
-  //   其他玩家:    立牌实宽 = (n-1)*(TW+0.05) + TW
   const p = players.value[pid];
   const handCount = p.hand.length;
   const handGap = pid === 0 ? TW + 0.06 : TW + 0.05;
-  // half-width of the centered hand block
   let handHalf = ((handCount - 1) * handGap) / 2 + TW / 2;
   if (pid === 0 && p.drawn != null) {
-    // drawn 牌往右多伸出 (gap + 0.45)
     handHalf += (TW + 0.06) + 0.45;
   }
 
-  // furo 第一组的中心 = 手牌右端 + groupWidth/2 + 一点边距
-  const furoMargin = 0.25;
+  const furoMargin = 0.3;
   const firstCenter = handHalf + furoMargin + groupWidth / 2;
 
-  // 各玩家:沿 "玩家面前" 的右方向向外延伸。
-  //   pid 0 (下): 手牌中心在 (0, HAND_Z=9.2),沿 +x 向外
-  //   pid 1 (右): 手牌中心在 (10.6, 0),沿 -z 向外(远离我们的视角)
-  //   pid 2 (上): 手牌中心在 (0, -10.6),沿 -x 向外
-  //   pid 3 (左): 手牌中心在 (-10.6, 0),沿 +z 向外
   let cx, cz, dirX, dirZ, yaw;
   if (pid === 0) {
     cx = firstCenter; cz = HAND_Z; dirX = 1; dirZ = 0; yaw = 0;
@@ -897,12 +953,12 @@ function layoutFuro(furo, pid) {
   }
 }
 
-// 渲染一组副露
+// 渲染一组副露。每张牌沿 meld 方向占用的宽度不同:
+//   立牌:沿方向占 TW (短边)
+//   横放:沿方向占 TH (长边) — 比立牌宽很多,是 overlap 的元凶
+// 所以用累计偏移 (cumulative offset),按每张实际宽度推进。
 function placeFuroGroup(meld, cx, cz, yaw) {
-  const step = TW + 0.02;
-  // 局部坐标系(沿 yaw 方向"右为正"):
-  //   在世界坐标里:沿 yaw 方向的前进 = (sin yaw, cos yaw)
-  // 不过简化处理:我们直接按 yaw 旋转每张牌并按面子方向相对位移
+  const gap = 0.04;
   const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
   const advance = (offset) => [cosY * offset, -sinY * offset];
 
@@ -910,25 +966,34 @@ function placeFuroGroup(meld, cx, cz, yaw) {
   const isAnkan = meld.type === "ankan";
   const rotatedIdx = meld.rotatedIdx ?? -1;
 
-  let ofs = -((tiles.length - 1) * step) / 2;  // center the meld
+  // 每张牌沿 meld 方向占的宽度
+  const widths = tiles.map((_, i) => (i === rotatedIdx ? TH : TW));
+  // 整组总宽
+  const total = widths.reduce((a, b) => a + b, 0) + gap * (tiles.length - 1);
+  // 起点(组内最左边的牌的左缘)
+  let edge = -total / 2;
+
   for (let i = 0; i < tiles.length; i++) {
     const tile = tiles[i];
+    const w = widths[i];
+    const center = edge + w / 2;            // 这张牌在 meld 方向上的中心偏移
     const showFace = !(isAnkan && (i === 0 || i === 3));  // ankan: 中两张面朝上
-    const [dx, dz] = advance(ofs);
+    const [dx, dz] = advance(center);
     if (i === rotatedIdx) {
-      // 横放被叫的牌:用 placeFlat 横放,同时 yaw 加 90° 表示旋转
-      // 用 yaw + 90° 让牌的"长边"朝向 yaw 方向
+      // 横放被叫的牌:placeFlat 把牌横躺在桌面,长边朝玩家右侧
       placeFlat(tile, cx + dx, cz + dz, yaw + Math.PI / 2, true);
     } else {
       placeStanding(tile, cx + dx, cz + dz, yaw, showFace, false);
     }
-    ofs += step;
+    edge += w + gap;
   }
-  // kakan: 在原先旋转牌的位置上方再叠一张(旋转 90°)
+
+  // kakan: 在原本横放牌的位置上方再叠一张(也横放)
   if (meld.type === "kakan" && meld.kakanTile != null && rotatedIdx >= 0) {
-    const ofs2 = -((tiles.length - 1) * step) / 2 + rotatedIdx * step;
-    const [dx, dz] = advance(ofs2);
-    // 叠一张同方向的横放,Y 抬高一点(简化:沿用 placeFlat 的 y=TD/2 + TD)
+    let acc = -total / 2;
+    for (let i = 0; i < rotatedIdx; i++) acc += widths[i] + gap;
+    const center = acc + widths[rotatedIdx] / 2;
+    const [dx, dz] = advance(center);
     placeFlat(meld.kakanTile, cx + dx, cz + dz, yaw + Math.PI / 2, true);
   }
 }

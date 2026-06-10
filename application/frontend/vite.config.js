@@ -3,7 +3,7 @@ import vue from "@vitejs/plugin-vue";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 
-const mahjongFilesDir = resolve("../Mortal/log-viewer/files");
+const mahjongFilesDir = resolve("../../source_code/log-viewer/files");
 const mimeTypes = {
   ".css": "text/css",
   ".gif": "image/gif",

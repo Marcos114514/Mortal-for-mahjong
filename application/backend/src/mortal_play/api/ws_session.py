@@ -62,6 +62,10 @@ async def _receive_reactions(ws: WebSocket, gm: GameMaster):
             data = json.loads(msg)
         except json.JSONDecodeError:
             continue
+        # Special control messages don't go to the GM as reactions.
+        if data.get("type") == "continue":
+            gm.continue_event.set()
+            continue
         await gm.human_reactions.put(data)
 
 

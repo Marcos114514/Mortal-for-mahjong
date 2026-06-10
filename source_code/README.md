@@ -1,60 +1,36 @@
-# Mahjong RL Agent Demo
+<p align="center">
+  <img src="https://github.com/Equim-chan/Mortal/raw/main/docs/src/assets/logo.png" width="550" />
+</p>
 
-This folder contains the source code written for the IEMS5726AB project demo.
-It wraps the Mortal mahjong agent source provided by the groupmate into a
-submission-friendly application:
+# Mortal
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/Equim-chan/Mortal/libriichi.yml?branch=main)](https://github.com/Equim-chan/Mortal/actions/workflows/libriichi.yml)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/Equim-chan/Mortal/docs.yml?branch=main&label=docs)](https://mortal.ekyu.moe)
+[![dependency status](https://deps.rs/repo/github/Equim-chan/Mortal/status.svg)](https://deps.rs/repo/github/Equim-chan/Mortal)
+![GitHub top language](https://img.shields.io/github/languages/top/Equim-chan/Mortal)
+![Lines of code](https://www.aschey.tech/tokei/github/Equim-chan/Mortal)
+![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/Equim-chan/Mortal)
+[![license](https://img.shields.io/github/license/Equim-chan/Mortal)](https://github.com/Equim-chan/Mortal/blob/main/LICENSE)
 
-- one human player
-- two random baseline agents
-- one reinforcement-learning agent slot
-- a Mortal CLI adapter when a trained Mortal checkpoint is available
-- a deterministic Mortal-inspired fallback policy for demo and grading without
-  shipping model weights
+[![Donate](https://img.shields.io/badge/Donate-%E2%9D%A4%EF%B8%8F-blue?style=social)](https://mortal.ekyu.moe/donate.html)
 
-The original Mortal source code remains in `../Mortal-for-mahjong/Mortal`.
-The course instruction says trained models should not be included in the ZIP/RAR,
-so put the checkpoint download link in `application/model_link.txt` and keep the
-actual `.pth` file outside the submission archive.
+Mortal ([凡夫](https://www.mdbg.net/chinese/dictionary?wdqb=%E5%87%A1%E5%A4%AB)) is a free and open source AI for Japanese mahjong, powered by deep reinforcement learning.
 
-## Run The Browser Demo
+Read the [**Documentation**](https://mortal.ekyu.moe) for everything about this work.
 
-Open:
+## Okay cool now give me the weights!
+Read [this post](https://gist.github.com/Equim-chan/cf3f01735d5d98f1e7be02e94b288c56) for details regarding this topic.
 
-```text
-../application/index.html
-```
+## License
+### Code
+[![AGPL-3.0-or-later](https://github.com/Equim-chan/Mortal/raw/main/docs/src/assets/agpl.png)](https://github.com/Equim-chan/Mortal/blob/main/LICENSE)
 
-No server is required. The demo implements a compact Japanese-mahjong-style draw
-and discard loop with visible hands, discards, wall count, agent reasoning, and a
-round log. It is designed for the short demonstration video.
+Copyright (C) 2021-2022 Equim
 
-## Optional Mortal Inference
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-If a Mortal checkpoint is available, copy
-`../Mortal-for-mahjong/Mortal/mortal/config.example.toml` to
-`../Mortal-for-mahjong/Mortal/mortal/config.toml`, then update:
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 
-```toml
-[control]
-state_file = "/absolute/path/to/mortal.best"
-```
+You should have received a copy of the GNU Affero General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-Then Mortal's documented CLI inference shape is:
-
-```bash
-cd ../Mortal-for-mahjong/Mortal/mortal
-python mortal.py 0 < log.json
-```
-
-The Python adapter in `mahjong_agent/agent.py` can call that CLI and parse the
-last JSON action. If the checkpoint or compiled `libriichi` dependency is not
-available, it falls back to the heuristic policy so the application still runs.
-
-## Project Mapping
-
-- Data collection: Mortal supports mjai/Tenhou-style logs (`.json.gz`).
-- Representation: game events are transformed into observation tensors and
-  action masks inside `libriichi`.
-- Modeling: Mortal uses a ResNet encoder plus DQN heads for action values.
-- Deployment: this demo exposes the agent as a browser-playable game and keeps
-  model inference replaceable through the CLI adapter.
+### Logo and Other Assets
+[![CC BY-SA 4.0](https://github.com/Equim-chan/Mortal/raw/main/docs/src/assets/by-sa.png)](https://creativecommons.org/licenses/by-sa/4.0/)

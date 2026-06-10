@@ -2,8 +2,8 @@
 Load a Mortal checkpoint (mortal_best.pth) and wrap it in a MortalEngine.
 
 The Mortal NN code (`Brain` ResNet + `DQN` head + `MortalEngine` adapter)
-lives in the upstream training Python directory `Mortal/mortal/`. We add it
-to sys.path on first import so the flat module names work.
+lives in the data-science pipeline at `source_code/mortal/`. We add it to
+sys.path on first import so the flat module names work.
 """
 from __future__ import annotations
 import logging
@@ -36,7 +36,7 @@ def select_device() -> torch.device:
 def load_mortal_engine(weights_path: str | Path):
     """Read a Mortal checkpoint → instantiate Brain+DQN → wrap in MortalEngine."""
     ensure_libriichi_importable()
-    # Late imports — these flat modules live in `Mortal/mortal/`.
+    # Late imports — these flat modules live in `source_code/mortal/`.
     from model import Brain, DQN          # type: ignore  # noqa: E402
     from engine import MortalEngine       # type: ignore  # noqa: E402
 
