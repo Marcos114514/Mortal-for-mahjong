@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.play — Mortal gameplay backend
+#
+# Builds libriichi.so, then runs a Python backend that serves the Mortal AI to
+# the Vue frontend. Works on both Mac (CPU) and Windows/Linux with NVIDIA (CUDA)
+# by switching the torch variant via a build ARG.
+#
+# Usage:
+#   Mac (CPU):
+#     docker build -f Dockerfile.play --build-arg TORCH_VARIANT=cpu  -t mortal-play .
+#   Windows/Linux + NVIDIA (CUDA 11.8):
+#     docker build -f Dockerfile.play --build-arg TORCH_VARIANT=cuda -t mortal-play .
+#     docker run --gpus all -p 8000:8000 mortal-play
+#
+#   (CPU run): docker run -p 8000:8000 mortal-play
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ===== Stage 1: build libriichi.so (identical on all platforms) =====
+FROM archlinux:base-devel AS libriichi_build
+
+RUN set -eux; \
+    pacman -Syu --noconfirm --needed rust python; \
+    pacman -Scc --noconfirm
+
+WORKDIR /
+COPY Cargo.toml Cargo.lock .
+COPY libriichi libriichi
+COPY exe-wrapper exe-wrapper
+
+RUN cargo build -p libriichi --lib --release
+
+# ===== Stage 2a: CPU runtime base (used by Mac) =====
+FROM python:3.10-slim AS runtime-cpu
+ENV TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ENV MORTAL_DEVICE=cpu
+
+# ===== Stage 2b: CUDA runtime base (used by Windows/Linux + NVIDIA) =====
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS runtime-cuda
+ENV TORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
+ENV MORTAL_DEVICE=cuda
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3 python3-pip python-is-python3; \
+    rm -rf /var/lib/apt/lists/*
+
+# ===== Stage 3: pick the base via ARG, install deps, run backend =====
+# TORCH_VARIANT must be "cpu" (default, Mac) or "cuda" (Windows/Linux + NVIDIA)
+ARG TORCH_VARIANT=cpu
+FROM runtime-${TORCH_VARIANT} AS final
+
+WORKDIR /mortal
+
+# Install torch (CPU or CUDA wheel, selected by the base image's TORCH_INDEX_URL)
+RUN set -eux; \
+    pip install --no-cache-dir --upgrade pip; \
+    pip install --no-cache-dir torch==2.1.2 --index-url "${TORCH_INDEX_URL}"; \
+    pip install --no-cache-dir toml tqdm fastapi "uvicorn[standard]" numpy
+
+# Mortal python sources + compiled libriichi
+COPY mortal .
+COPY --from=libriichi_build /target/release/libriichi.so .
+
+# Gameplay backend (added separately)
+COPY mortal/server_play.py ./server_play.py
+
+ENV MORTAL_CFG=config.toml
+COPY config.docker.toml config.toml
+
+# Model checkpoint is mounted at runtime (not baked into the image)
+VOLUME /mnt
+EXPOSE 8000
+
+# MORTAL_DEVICE is inherited from the chosen base (cpu or cuda)
+ENTRYPOINT ["python", "server_play.py"]

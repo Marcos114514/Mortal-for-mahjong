@@ -1,13 +1,41 @@
-Do not include trained model checkpoints in the course ZIP/RAR.
+Trained model checkpoint
+========================
 
-Model source:
-https://github.com/Equim-chan/Mortal
+File:    mortal_best.pth
+Size:    ~131 MB
+Format:  PyTorch state_dict (torch.load) — keys "mortal", "current_dqn",
+         "config" (control.version=4, resnet.num_blocks=40, resnet.conv_channels=192)
 
-Put the selected checkpoint download link here before final Blackboard
-submission, for example:
+Origin
+------
+This is a Mortal v4 checkpoint produced by the training pipeline in
+../source_code/. Per the upstream Mortal project's policy, trained model
+weights are NOT redistributed in the public repository.
 
-Mortal checkpoint: <paste Google Drive / OneDrive / GitHub Release link>
+Download
+--------
+For instructions on obtaining a Mortal checkpoint, see the upstream notes:
 
-The browser demo works without the checkpoint by using a deterministic
-Mortal-inspired fallback policy. The Python adapter in source_code can call
-Mortal's documented CLI once a checkpoint is configured.
+    https://gist.github.com/Equim-chan/cf3f01735d5d98f1e7be02e94b288c56
+
+Or train your own from logs using the pipeline in `source_code/`:
+
+    cd source_code/mortal
+    python train.py        # see Mortal/docs for full training docs
+
+Where to put it
+---------------
+After downloading, place the checkpoint at the repo root:
+
+    Mortal-for-mahjong/mortal_best.pth
+
+The backend (`application/backend`) will pick it up automatically — see
+`application/backend/src/mortal_play/util/paths.py::default_weights_path`.
+
+Override at runtime with:
+
+    ./application/scripts/run-backend.sh         # uses default path
+    # or:
+    PYTHONPATH=application/backend/src \
+      source_code/.venv/bin/python -m mortal_play \
+      --weights /custom/path/to/mortal_best.pth
