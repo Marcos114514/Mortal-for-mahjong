@@ -46,8 +46,26 @@ enable_augmentation = false
 augmented_first = false
 
 [env]
-gamma = 1
-pts = [6.0, 4.0, 2.0, 0.0]
+# Recommended: align training utility with Tenhou's seat point payouts so
+# that avg_pt (the test KPI) and the optimization target match.
+# Old default (kept here for reference): pts = [6.0, 4.0, 2.0, 0.0]
+gamma = 0.99
+pts = [90.0, 45.0, 0.0, -135.0]
+
+# ── intra-kyoku potential-based shaping (defaults reproduce old behavior) ─
+# Φ(s) = -shanten_weight * shanten(s); r_t += γΦ(s_{t+1}) - Φ(s_t)
+shanten_weight = 0.0    # try 0.05 ~ 0.2 once you have a baseline
+houjuu_penalty = 0.0    # extra penalty applied on a deal-in step
+
+# ── target network + 1-step TD bootstrap (off by default) ────────────────
+# When enabled, dataloader emits next_obs/next_mask and the trainer uses
+# r_t + γ max_a' Q_target(s_{t+1}, a') instead of MC return.
+use_target_net   = false
+target_tau       = 0.005   # Polyak averaging coefficient
+target_sync_every = 1      # sync every N gradient steps
+
+# ── distributional Q (QR-DQN). 1 = scalar Q (back-compat), >1 enables it ─
+num_quantiles = 1          # try 51 once stable
 
 [resnet]
 conv_channels = 192
@@ -58,6 +76,10 @@ min_q_weight = 5
 
 [aux]
 next_rank_weight = 0.2
+# Optional new aux heads (defaults 0 = old behavior). When > 0 the AuxNet
+# grows extra output dims; check model.py / train.py for the dim layout.
+shanten_weight = 0.0       # supervised regression on current shanten
+houjuu_weight  = 0.0       # supervised binary on whether next event is a deal-in
 
 [freeze_bn]
 # `true` in online training

@@ -21,6 +21,11 @@ class MortalEngine:
         boltzmann_epsilon = 0,
         boltzmann_temp = 1,
         top_p = 1,
+        # ── new ─────────────────────────────────────────────────────────────
+        # If 0 < cvar_alpha < 1 and dqn is distributional (num_quantiles>1),
+        # action selection uses the mean of the bottom α-quantiles instead of
+        # the full mean — i.e., CVaR_α (risk-averse). 0 disables it.
+        cvar_alpha = 0.0,
     ):
         self.engine_type = 'mortal'
         self.device = device or torch.device('cpu')
@@ -39,6 +44,7 @@ class MortalEngine:
         self.boltzmann_epsilon = boltzmann_epsilon
         self.boltzmann_temp = boltzmann_temp
         self.top_p = top_p
+        self.cvar_alpha = float(cvar_alpha)
 
     def react_batch(self, obs, masks, invisible_obs):
         try:
@@ -64,10 +70,26 @@ class MortalEngine:
                     latent = Normal(mu, logsig.exp() + 1e-6).sample()
                 else:
                     latent = mu
-                q_out = self.dqn(latent, masks)
+                q_raw = self.dqn(latent, masks)
             case 2 | 3 | 4:
                 phi = self.brain(obs)
-                q_out = self.dqn(phi, masks)
+                q_raw = self.dqn(phi, masks)
+
+        # Reduce to scalar Q for action selection.
+        # - Standard DQN (N=1): q_raw already (B, A).
+        # - QR-DQN (N>1):
+        #     cvar_alpha == 0  → mean over quantiles (== expected Q)
+        #     cvar_alpha in (0,1] → mean of bottom α quantiles (CVaR_α)
+        if q_raw.dim() == 3:
+            if 0.0 < self.cvar_alpha < 1.0:
+                k = max(1, int(round(self.cvar_alpha * q_raw.shape[-1])))
+                q_sorted, _ = q_raw.sort(dim=-1)
+                q_out = q_sorted[..., :k].mean(dim=-1)
+            else:
+                q_out = q_raw.mean(dim=-1)
+            q_out = q_out.masked_fill(~masks, -torch.inf)
+        else:
+            q_out = q_raw
 
         if self.boltzmann_epsilon > 0:
             is_greedy = torch.full((batch_size,), 1-self.boltzmann_epsilon, device=self.device).bernoulli().to(torch.bool)

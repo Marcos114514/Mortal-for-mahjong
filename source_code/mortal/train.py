@@ -38,6 +38,18 @@ def train():
     test_games = config['test_play']['games']
     min_q_weight = config['cql']['min_q_weight']
     next_rank_weight = config['aux']['next_rank_weight']
+    # ── new aux task weights (default 0 → identical to old behavior) ────────
+    shanten_aux_weight = config['aux'].get('shanten_weight', 0.0)
+    houjuu_aux_weight  = config['aux'].get('houjuu_weight',  0.0)
+    # ── new reward shaping weights ───────────────────────────────────────────
+    shanten_shape_weight = config['env'].get('shanten_weight', 0.0)
+    houjuu_shape_weight  = config['env'].get('houjuu_penalty', 0.0)
+    # ── target network + n-step bootstrap (default off) ─────────────────────
+    use_target_net = config['env'].get('use_target_net', False)
+    target_tau     = config['env'].get('target_tau', 0.005)
+    target_sync_every = config['env'].get('target_sync_every', 1)
+    # ── distributional Q (QR-DQN). num_quantiles=1 → scalar Q (default) ─────
+    num_quantiles = config['env'].get('num_quantiles', 1)
     assert save_every % opt_step_every == 0
     assert test_every % save_every == 0
 
@@ -60,9 +72,34 @@ def train():
     max_grad_norm = config['optim']['max_grad_norm']
 
     mortal = Brain(version=version, **config['resnet']).to(device)
-    dqn = DQN(version=version).to(device)
-    aux_net = AuxNet((4,)).to(device)
+    dqn = DQN(version=version, num_quantiles=num_quantiles).to(device)
+    # AuxNet outputs are concatenated heads. Old layout: (4,) for next-rank.
+    # New layout: optionally append more heads. Order MUST match the loss.
+    #   slot 0: next-rank logits (4 classes)         — always present
+    #   slot 1: shanten regression (1 dim)           — if shanten_aux_weight > 0
+    #   slot 2: houjuu probability logit (1 dim)     — if houjuu_aux_weight  > 0
+    aux_dims = [4]
+    if shanten_aux_weight > 0.0: aux_dims.append(1)
+    if houjuu_aux_weight  > 0.0: aux_dims.append(1)
+    aux_net = AuxNet(tuple(aux_dims)).to(device)
     all_models = (mortal, dqn, aux_net)
+
+    # Target networks (only constructed when enabled to avoid memory cost).
+    target_mortal = None
+    target_dqn = None
+    if use_target_net:
+        import copy
+        target_mortal = copy.deepcopy(mortal).eval().to(device)
+        target_dqn = copy.deepcopy(dqn).eval().to(device)
+        for p in target_mortal.parameters(): p.requires_grad_(False)
+        for p in target_dqn.parameters():    p.requires_grad_(False)
+
+    def _polyak_update(src, tgt, tau):
+        with torch.no_grad():
+            for ps, pt in zip(src.parameters(), tgt.parameters()):
+                pt.data.mul_(1.0 - tau).add_(ps.data, alpha=tau)
+            for bs, bt in zip(src.buffers(), tgt.buffers()):
+                bt.data.copy_(bs.data)
     if enable_compile:
         for m in all_models:
             m.compile()
@@ -135,6 +172,8 @@ def train():
         'dqn_loss': 0,
         'cql_loss': 0,
         'next_rank_loss': 0,
+        'shanten_aux_loss': 0,
+        'houjuu_aux_loss': 0,
     }
     all_q = torch.zeros((save_every, batch_size), device=device, dtype=torch.float32)
     all_q_target = torch.zeros((save_every, batch_size), device=device, dtype=torch.float32)
@@ -193,6 +232,10 @@ def train():
             num_epochs = num_epochs,
             enable_augmentation = enable_augmentation,
             augmented_first = augmented_first,
+            shanten_weight = shanten_shape_weight,
+            houjuu_penalty = houjuu_shape_weight,
+            emit_next = use_target_net,
+            emit_aux_labels = (shanten_aux_weight > 0.0 or houjuu_aux_weight > 0.0),
         )
         data_loader = iter(DataLoader(
             dataset = file_data,
@@ -203,16 +246,35 @@ def train():
             worker_init_fn = worker_init_fn,
         ))
 
-        remaining_obs = []
-        remaining_actions = []
-        remaining_masks = []
-        remaining_steps_to_done = []
-        remaining_kyoku_rewards = []
-        remaining_player_ranks = []
+        remaining = {k: [] for k in (
+            'obs', 'actions', 'masks', 'steps_to_done',
+            'kyoku_rewards', 'player_ranks',
+            'intra_rewards', 'dones',
+            'next_obs', 'next_masks',
+        )}
         remaining_bs = 0
         pb = tqdm(total=save_every, desc='TRAIN', initial=steps % save_every)
 
-        def train_batch(obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks):
+        # Pre-compute quantile midpoints τ_i for QR-DQN loss.
+        if num_quantiles > 1:
+            taus = (torch.arange(num_quantiles, device=device, dtype=torch.float32) + 0.5) / num_quantiles
+        else:
+            taus = None
+
+        def quantile_huber_loss(q_pred, q_target):
+            """QR-DQN loss. q_pred (B, N), q_target (B, N)."""
+            # td: (B, N_target, N_pred)  — pairs of all (target_j, pred_i)
+            td = q_target.unsqueeze(-1) - q_pred.unsqueeze(1)
+            # Huber κ=1
+            huber = torch.where(td.abs() <= 1.0, 0.5 * td.pow(2), td.abs() - 0.5)
+            tau = taus.view(1, 1, -1)                          # (1, 1, N_pred)
+            weight = (tau - (td.detach() < 0).float()).abs()
+            return (weight * huber).sum(dim=-1).mean()
+
+        def train_batch(obs, actions, masks, steps_to_done, kyoku_rewards,
+                        player_ranks, intra_rewards, dones,
+                        next_obs=None, next_masks=None,
+                        aux_shanten=None, aux_houjuu=None):
             nonlocal steps
             nonlocal idx
             nonlocal pb
@@ -223,28 +285,99 @@ def train():
             steps_to_done = steps_to_done.to(dtype=torch.int64, device=device)
             kyoku_rewards = kyoku_rewards.to(dtype=torch.float64, device=device)
             player_ranks = player_ranks.to(dtype=torch.int64, device=device)
+            intra_rewards = intra_rewards.to(dtype=torch.float32, device=device)
+            dones = dones.to(dtype=torch.bool, device=device)
             assert masks[range(batch_size), actions].all()
 
-            q_target_mc = gamma ** steps_to_done * kyoku_rewards
-            q_target_mc = q_target_mc.to(torch.float32)
+            # Reward target. Two routes:
+            #   (a) MC return (default, online + offline both use this if
+            #       use_target_net=False).
+            #   (b) 1-step TD with target net + intra shaping (when enabled).
+            if use_target_net:
+                next_obs_t = next_obs.to(dtype=torch.float32, device=device)
+                next_masks_t = next_masks.to(dtype=torch.bool, device=device)
+                with torch.no_grad():
+                    next_phi = target_mortal(next_obs_t)
+                    next_q = target_dqn.expected_q(next_phi, next_masks_t)
+                    next_v = next_q.amax(dim=-1)
+                    # Reward at time t: kyoku contribution applies only at the
+                    # final step of the kyoku, but we keep the original MC
+                    # contract on terminal steps for stability.
+                    base_r = intra_rewards
+                    final_kyoku_r = kyoku_rewards.to(torch.float32) * dones.float()
+                    r_t = base_r + final_kyoku_r
+                    not_done = (~dones).float()
+                    if num_quantiles > 1:
+                        next_phi_dist = next_phi
+                        # bootstrap with the per-quantile distribution of the
+                        # greedy action under the target dueling head.
+                        target_q_all = target_dqn(next_phi_dist, next_masks_t)  # (B, A, N)
+                        a_star = target_q_all.mean(dim=-1).argmax(dim=-1)
+                        bootstrap = target_q_all[range(batch_size), a_star]      # (B, N)
+                        q_target = r_t.unsqueeze(-1) + gamma * not_done.unsqueeze(-1) * bootstrap
+                    else:
+                        q_target = r_t + gamma * not_done * next_v
+                q_target = q_target.detach()
+            else:
+                q_target_mc = (gamma ** steps_to_done * kyoku_rewards).to(torch.float32)
+                # Add intra shaping. It's already a per-step Δ-potential, so
+                # adding it to the MC return is still potential-based overall
+                # (adds Φ(s_T) - Φ(s_t) for the kyoku, telescoping).
+                q_target_mc = q_target_mc + intra_rewards
+                q_target = q_target_mc.detach()
 
             with torch.autocast(device.type, enabled=enable_amp):
                 phi = mortal(obs)
-                q_out = dqn(phi, masks)
-                q = q_out[range(batch_size), actions]
-                dqn_loss = 0.5 * mse(q, q_target_mc)
+                q_all = dqn(phi, masks)               # (B, A) or (B, A, N)
+                if num_quantiles > 1:
+                    q_a = q_all[range(batch_size), actions]                # (B, N)
+                    if q_target.dim() == 1:
+                        q_target = q_target.unsqueeze(-1).expand(-1, num_quantiles)
+                    dqn_loss = quantile_huber_loss(q_a, q_target)
+                    q_expected = q_all.mean(dim=-1)                        # for CQL
+                    q_expected = q_expected.masked_fill(~masks, -torch.inf)
+                    q_scalar = q_a.mean(dim=-1)
+                else:
+                    q_a = q_all[range(batch_size), actions]                # (B,)
+                    dqn_loss = 0.5 * mse(q_a, q_target)
+                    q_expected = q_all
+                    q_scalar = q_a
+
                 cql_loss = 0
                 if not online:
-                    cql_loss = q_out.logsumexp(-1).mean() - q.mean()
+                    cql_loss = q_expected.logsumexp(-1).mean() - q_scalar.mean()
 
-                next_rank_logits, = aux_net(phi)
+                # ── Aux losses ──────────────────────────────────────────────
+                aux_outputs = aux_net(phi)
+                next_rank_logits = aux_outputs[0]
                 next_rank_loss = ce(next_rank_logits, player_ranks)
 
-                loss = sum((
+                aux_extras = []
+                aux_idx = 1
+                shanten_aux_loss = torch.tensor(0.0, device=device)
+                houjuu_aux_loss  = torch.tensor(0.0, device=device)
+                if shanten_aux_weight > 0.0:
+                    if aux_shanten is not None:
+                        # 1-dim head: regress shanten in float.
+                        pred = aux_outputs[aux_idx].squeeze(-1)
+                        shanten_aux_loss = mse(pred, aux_shanten.to(device, dtype=torch.float32))
+                        aux_extras.append(shanten_aux_loss * shanten_aux_weight)
+                    aux_idx += 1
+                if houjuu_aux_weight > 0.0:
+                    if aux_houjuu is not None:
+                        pred_logit = aux_outputs[aux_idx].squeeze(-1)
+                        target = aux_houjuu.to(device, dtype=torch.float32)
+                        houjuu_aux_loss = nn.functional.binary_cross_entropy_with_logits(
+                            pred_logit, target
+                        )
+                        aux_extras.append(houjuu_aux_loss * houjuu_aux_weight)
+                    aux_idx += 1
+
+                loss = sum([
                     dqn_loss,
                     cql_loss * min_q_weight,
                     next_rank_loss * next_rank_weight,
-                ))
+                ] + aux_extras)
             scaler.scale(loss / opt_step_every).backward()
 
             with torch.inference_mode():
@@ -252,11 +385,19 @@ def train():
                 if not online:
                     stats['cql_loss'] += cql_loss
                 stats['next_rank_loss'] += next_rank_loss
-                all_q[idx] = q
-                all_q_target[idx] = q_target_mc
+                stats['shanten_aux_loss'] += shanten_aux_loss
+                stats['houjuu_aux_loss'] += houjuu_aux_loss
+                all_q[idx] = q_scalar.float()
+                if q_target.dim() == 2:
+                    all_q_target[idx] = q_target.mean(dim=-1).float()
+                else:
+                    all_q_target[idx] = q_target.float()
 
             steps += 1
             idx += 1
+            if use_target_net and steps % target_sync_every == 0:
+                _polyak_update(mortal, target_mortal, target_tau)
+                _polyak_update(dqn,    target_dqn,    target_tau)
             if idx % opt_step_every == 0:
                 if max_grad_norm > 0:
                     scaler.unscale_(optimizer)
@@ -283,6 +424,10 @@ def train():
                 if not online:
                     writer.add_scalar('loss/cql_loss', stats['cql_loss'] / save_every, steps)
                 writer.add_scalar('loss/next_rank_loss', stats['next_rank_loss'] / save_every, steps)
+                if shanten_aux_weight > 0.0:
+                    writer.add_scalar('loss/shanten_aux_loss', stats['shanten_aux_loss'] / save_every, steps)
+                if houjuu_aux_weight > 0.0:
+                    writer.add_scalar('loss/houjuu_aux_loss', stats['houjuu_aux_loss'] / save_every, steps)
                 writer.add_scalar('hparam/lr', scheduler.get_last_lr()[0], steps)
                 writer.add_histogram('q_predicted', all_q_1d, steps)
                 writer.add_histogram('q_target', all_q_target_1d, steps)
@@ -386,27 +531,73 @@ def train():
                         sys.exit(0)
                 pb = tqdm(total=save_every, desc='TRAIN')
 
-        for obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks in data_loader:
+        def _expand_batch(t):
+            """DataLoader yields tuples; collate them into either 8 or 10 tensors."""
+            return t
+
+        # Layout of every yielded sample (and therefore the collated batch):
+        #   [obs, action, mask, steps_to_done, kyoku_rwd, player_rank,
+        #    intra, done,
+        #    (next_obs, next_mask)?,
+        #    (aux_shanten, aux_houjuu)?]
+        emit_aux = (shanten_aux_weight > 0.0 or houjuu_aux_weight > 0.0)
+        for batch in data_loader:
+            obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks, intra_rewards, dones = batch[:8]
+            cursor = 8
+            if use_target_net:
+                next_obs   = batch[cursor]
+                next_masks = batch[cursor + 1]
+                cursor += 2
+            else:
+                next_obs = next_masks = None
+            if emit_aux:
+                aux_shanten = batch[cursor]
+                aux_houjuu  = batch[cursor + 1]
+                cursor += 2
+            else:
+                aux_shanten = aux_houjuu = None
             bs = obs.shape[0]
             if bs != batch_size:
-                remaining_obs.append(obs)
-                remaining_actions.append(actions)
-                remaining_masks.append(masks)
-                remaining_steps_to_done.append(steps_to_done)
-                remaining_kyoku_rewards.append(kyoku_rewards)
-                remaining_player_ranks.append(player_ranks)
+                remaining['obs'].append(obs)
+                remaining['actions'].append(actions)
+                remaining['masks'].append(masks)
+                remaining['steps_to_done'].append(steps_to_done)
+                remaining['kyoku_rewards'].append(kyoku_rewards)
+                remaining['player_ranks'].append(player_ranks)
+                remaining['intra_rewards'].append(intra_rewards)
+                remaining['dones'].append(dones)
+                if next_obs is not None:
+                    remaining['next_obs'].append(next_obs)
+                    remaining['next_masks'].append(next_masks)
+                if aux_shanten is not None:
+                    remaining.setdefault('aux_shanten', []).append(aux_shanten)
+                    remaining.setdefault('aux_houjuu', []).append(aux_houjuu)
                 remaining_bs += bs
                 continue
-            train_batch(obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks)
+            train_batch(
+                obs, actions, masks, steps_to_done, kyoku_rewards,
+                player_ranks, intra_rewards, dones,
+                next_obs=next_obs, next_masks=next_masks,
+                aux_shanten=aux_shanten, aux_houjuu=aux_houjuu,
+            )
 
         remaining_batches = remaining_bs // batch_size
         if remaining_batches > 0:
-            obs = torch.cat(remaining_obs, dim=0)
-            actions = torch.cat(remaining_actions, dim=0)
-            masks = torch.cat(remaining_masks, dim=0)
-            steps_to_done = torch.cat(remaining_steps_to_done, dim=0)
-            kyoku_rewards = torch.cat(remaining_kyoku_rewards, dim=0)
-            player_ranks = torch.cat(remaining_player_ranks, dim=0)
+            cat = lambda key: torch.cat(remaining[key], dim=0)
+            obs           = cat('obs')
+            actions       = cat('actions')
+            masks         = cat('masks')
+            steps_to_done = cat('steps_to_done')
+            kyoku_rewards = cat('kyoku_rewards')
+            player_ranks  = cat('player_ranks')
+            intra_rewards = cat('intra_rewards')
+            dones         = cat('dones')
+            has_next = bool(remaining['next_obs'])
+            next_obs   = cat('next_obs')   if has_next else None
+            next_masks = cat('next_masks') if has_next else None
+            has_aux = bool(remaining.get('aux_shanten'))
+            aux_shanten_full = cat('aux_shanten') if has_aux else None
+            aux_houjuu_full  = cat('aux_houjuu')  if has_aux else None
             start = 0
             end = batch_size
             while end <= remaining_bs:
@@ -417,6 +608,12 @@ def train():
                     steps_to_done[start:end],
                     kyoku_rewards[start:end],
                     player_ranks[start:end],
+                    intra_rewards[start:end],
+                    dones[start:end],
+                    next_obs=(next_obs[start:end] if has_next else None),
+                    next_masks=(next_masks[start:end] if has_next else None),
+                    aux_shanten=(aux_shanten_full[start:end] if has_aux else None),
+                    aux_houjuu=(aux_houjuu_full[start:end] if has_aux else None),
                 )
                 start = end
                 end += batch_size

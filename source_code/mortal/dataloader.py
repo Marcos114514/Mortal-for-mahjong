@@ -21,6 +21,11 @@ class FileDatasetsIter(IterableDataset):
         num_epochs = 1,
         enable_augmentation = False,
         augmented_first = False,
+        # ── new, all backward-compatible (defaults reproduce old behavior) ──
+        shanten_weight = 0.0,
+        houjuu_penalty = 0.0,
+        emit_next = False,    # if True, also yield next_obs / next_mask for TD
+        emit_aux_labels = False,  # if True, yield (shanten, houjuu) per step
     ):
         super().__init__()
         self.version = version
@@ -34,6 +39,10 @@ class FileDatasetsIter(IterableDataset):
         self.num_epochs = num_epochs
         self.enable_augmentation = enable_augmentation
         self.augmented_first = augmented_first
+        self.shanten_weight = shanten_weight
+        self.houjuu_penalty = houjuu_penalty
+        self.emit_next = emit_next
+        self.emit_aux_labels = emit_aux_labels
         self.iterator = None
 
     def build_iter(self):
@@ -41,7 +50,13 @@ class FileDatasetsIter(IterableDataset):
         self.grp = GRP(**config['grp']['network'])
         grp_state = torch.load(config['grp']['state_file'], weights_only=True, map_location=torch.device('cpu'))
         self.grp.load_state_dict(grp_state['model'])
-        self.reward_calc = RewardCalculator(self.grp, self.pts)
+        self.reward_calc = RewardCalculator(
+            self.grp,
+            self.pts,
+            shanten_weight=self.shanten_weight,
+            houjuu_penalty=self.houjuu_penalty,
+            gamma=config['env'].get('gamma', 1.0),
+        )
 
         for _ in range(self.num_epochs):
             yield from self.load_files(self.augmented_first)
@@ -90,6 +105,10 @@ class FileDatasetsIter(IterableDataset):
                 at_kyoku = game.take_at_kyoku()
                 dones = game.take_dones()
                 apply_gamma = game.take_apply_gamma()
+                # Pull shantens whenever any feature consuming them is on.
+                need_shantens = self.shanten_weight > 0.0 or self.emit_aux_labels
+                shantens = game.take_shantens() if need_shantens else None
+                houjuus = game.take_houjuus() if self.emit_aux_labels else None
 
                 # per game
                 grp = game.take_grp()
@@ -101,6 +120,12 @@ class FileDatasetsIter(IterableDataset):
                 rank_by_player = grp.take_rank_by_player()
                 kyoku_rewards = self.reward_calc.calc_delta_pt(player_id, grp_feature, rank_by_player)
                 assert len(kyoku_rewards) >= at_kyoku[-1] + 1 # usually they are equal, unless there is no action in the last kyoku
+
+                # Optional intra-kyoku shaping (potential-based, doesn't change π*).
+                if shantens is not None:
+                    intra = self.reward_calc.calc_intra_shaping(shantens, dones, apply_gamma)
+                else:
+                    intra = np.zeros(game_size, dtype=np.float32)
 
                 final_scores = grp.take_final_scores()
                 scores_seq = np.concatenate((grp_feature[:, 3:] * 1e4, [final_scores]))
@@ -120,7 +145,18 @@ class FileDatasetsIter(IterableDataset):
                         steps_to_done[i],
                         kyoku_rewards[at_kyoku[i]],
                         player_ranks[at_kyoku[i] + 1],
+                        np.float32(intra[i]),                              # per-step shaping
+                        bool(dones[i]),                                    # terminal flag
                     ]
+                    if self.emit_next:
+                        # next_obs / next_mask = self at next step (or self if terminal).
+                        nxt = min(i + 1, game_size - 1)
+                        entry.append(obs[nxt])
+                        entry.append(masks[nxt])
+                    if self.emit_aux_labels:
+                        # shanten regressed in float, houjuu as 0/1 float for BCE.
+                        entry.append(np.float32(shantens[i] if shantens is not None else 0))
+                        entry.append(np.float32(1.0 if (houjuus is not None and houjuus[i]) else 0.0))
                     if self.oracle:
                         entry.insert(1, invisible_obs[i])
                     self.buffer.append(entry)

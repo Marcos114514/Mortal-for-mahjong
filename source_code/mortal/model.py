@@ -195,40 +195,81 @@ class AuxNet(nn.Module):
         return self.net(x).split(self.dims, dim=-1)
 
 class DQN(nn.Module):
-    def __init__(self, *, version=1):
+    """Dueling Q head.
+
+    `num_quantiles=1` (default) → scalar Q, fully backward compatible with
+    existing checkpoints (mortal_best.pth loads as before).
+
+    `num_quantiles=N>1` → distributional Q (QR-DQN). The forward returns
+    quantile Q(τ_i, s, a) of shape (B, A, N). The mean across τ is the
+    expected Q used for action selection; CVaR can be derived from the
+    bottom α quantiles.
+    """
+    def __init__(self, *, version=1, num_quantiles=1):
         super().__init__()
         self.version = version
+        self.num_quantiles = int(num_quantiles)
+        N = self.num_quantiles
         match version:
             case 1:
-                self.v_head = nn.Linear(512, 1)
-                self.a_head = nn.Linear(512, ACTION_SPACE)
+                self.v_head = nn.Linear(512, 1 * N)
+                self.a_head = nn.Linear(512, ACTION_SPACE * N)
             case 2 | 3:
                 hidden_size = 512 if version == 2 else 256
                 self.v_head = nn.Sequential(
                     nn.Linear(1024, hidden_size),
                     nn.Mish(inplace=True),
-                    nn.Linear(hidden_size, 1),
+                    nn.Linear(hidden_size, 1 * N),
                 )
                 self.a_head = nn.Sequential(
                     nn.Linear(1024, hidden_size),
                     nn.Mish(inplace=True),
-                    nn.Linear(hidden_size, ACTION_SPACE),
+                    nn.Linear(hidden_size, ACTION_SPACE * N),
                 )
             case 4:
-                self.net = nn.Linear(1024, 1 + ACTION_SPACE)
+                # NOTE: keep parameter shape == old shape when N=1 so old
+                # mortal_best.pth checkpoints still load with strict=True.
+                self.net = nn.Linear(1024, (1 + ACTION_SPACE) * N)
                 nn.init.constant_(self.net.bias, 0)
 
-    def forward(self, phi, mask):
+    def _split_va(self, phi):
+        N = self.num_quantiles
         if self.version == 4:
-            v, a = self.net(phi).split((1, ACTION_SPACE), dim=-1)
+            out = self.net(phi)               # (B, (1+A)*N)
+            v_a = out.view(out.shape[0], 1 + ACTION_SPACE, N)
+            v = v_a[:, :1, :]                 # (B, 1, N)
+            a = v_a[:, 1:, :]                 # (B, A, N)
         else:
-            v = self.v_head(phi)
-            a = self.a_head(phi)
-        a_sum = a.masked_fill(~mask, 0.).sum(-1, keepdim=True)
-        mask_sum = mask.sum(-1, keepdim=True)
-        a_mean = a_sum / mask_sum
-        q = (v + a - a_mean).masked_fill(~mask, -torch.inf)
+            v = self.v_head(phi).view(-1, 1, N)
+            a = self.a_head(phi).view(-1, ACTION_SPACE, N)
+        return v, a
+
+    def forward(self, phi, mask):
+        """Return per-quantile Q. Shape (B, A) if N=1 else (B, A, N).
+
+        Illegal actions are filled with -inf in the *expected* Q. For the
+        per-quantile tensor we leave them at the raw value to keep the
+        Huber loss well-defined when needed; callers that want greedy
+        argmax should call `expected_q(phi, mask)`.
+        """
+        v, a = self._split_va(phi)
+        # mean over legal actions, per quantile
+        legal = mask.unsqueeze(-1)                     # (B, A, 1)
+        a_legal_sum = (a * legal).sum(dim=1, keepdim=True)
+        a_mean = a_legal_sum / legal.sum(dim=1, keepdim=True).clamp_min(1)
+        q = v + a - a_mean                             # (B, A, N)
+        if self.num_quantiles == 1:
+            q = q.squeeze(-1)                          # (B, A)
+            return q.masked_fill(~mask, -torch.inf)
         return q
+
+    def expected_q(self, phi, mask):
+        """Mean-over-quantiles Q with illegal actions masked to -inf."""
+        q = self.forward(phi, mask)
+        if self.num_quantiles == 1:
+            return q
+        q_mean = q.mean(dim=-1)
+        return q_mean.masked_fill(~mask, -torch.inf)
 
 class GRP(nn.Module):
     def __init__(self, hidden_size=64, num_layers=2):

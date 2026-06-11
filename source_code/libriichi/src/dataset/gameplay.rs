@@ -56,6 +56,9 @@ pub struct Gameplay {
     pub apply_gamma: Vec<bool>,
     pub at_turns: Vec<u8>,
     pub shantens: Vec<i8>,
+    /// True for steps after which the POV player got run over (target of a
+    /// Hora that they didn't initiate). Used as a supervised aux signal.
+    pub houjuus: Vec<bool>,
 
     // per game
     pub grp: Grp, // actually per kyoku though
@@ -225,6 +228,9 @@ impl Gameplay {
     }
     fn take_shantens(&mut self) -> Vec<i8> {
         mem::take(&mut self.shantens)
+    }
+    fn take_houjuus(&mut self) -> Vec<bool> {
+        mem::take(&mut self.houjuus)
     }
 
     fn take_grp(&mut self) -> Grp {
@@ -415,6 +421,27 @@ impl Gameplay {
             if let Some(kan) = kan_select {
                 self.add_entry(ctx, true, kan);
             }
+
+            // Mark the just-pushed step as a deal-in (放铳) if the very
+            // next mjai event is a Hora whose target is this player.
+            // We only consider discards (label < 37); chi/pon/kan choices
+            // can't directly be the deal-in event.
+            if label < 37 {
+                for ev in &wnd[1..] {
+                    match *ev {
+                        Event::EndKyoku => break,
+                        Event::Hora { actor, target, .. }
+                            if target == self.player_id && actor != self.player_id =>
+                        {
+                            if let Some(last) = self.houjuus.last_mut() {
+                                *last = true;
+                            }
+                            break;
+                        }
+                        _ => (),
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -425,10 +452,16 @@ impl Gameplay {
         self.actions.push(label as i64);
         self.masks.push(mask);
         self.at_kyoku.push(ctx.kyoku_idx as u8);
-        // only discard and kan will discount
-        self.apply_gamma.push(label <= 37);
+        // Only discards (and kan-choice indices 0..36) consume a "step" for
+        // γ-discounting. Note that the riichi declaration (label==37) is
+        // immediately followed by a dahai, so counting both as separate
+        // steps double-counts the time delta. label<37 fixes that.
+        self.apply_gamma.push(label < 37);
         self.at_turns.push(ctx.state.at_turn());
         self.shantens.push(ctx.state.shanten());
+        // Default: assume not a deal-in. Patched to true later if the very
+        // next mjai event is a Hora whose target is this player.
+        self.houjuus.push(false);
 
         if let Some(invisibles) = ctx.invisibles {
             let invisible_obs = invisibles[ctx.kyoku_idx].encode(
